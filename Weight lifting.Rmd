@@ -1,0 +1,131 @@
+---
+title: "Weight lifting prediction"
+output: html_document
+---
+
+## Goal
+
+The goal of the project is to predict the manner in which participants did a weight lifting exercise based on data extracted from several sensors in the belt, arm and forearm of the participant as well as in the dumbbell. This is the "classe" variable in the training set.
+
+## Setting envirorment
+
+```{r, message=FALSE}
+library(caret)
+library(dplyr)
+library(readr)
+library(corrplot)
+
+# url_training<-'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+# url_testing<-'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+
+# download.file(url_training, 'pml-training.csv')
+# download.file(url_testing, 'pml-testing.csv')
+
+training<-read.csv('pml-training.csv')
+testing<-read.csv('pml-testing.csv')
+```
+
+## Setting and Cleaning data
+
+Taking a look on the data we can see several features that are empty or NA. We clean the data from them. Descriptives variables (column 1 to 7) are also removed from the datasets. We use the function caret::nearZeroVar() to clean any feature that has no variation between datapoints. Then we partition the training detaset to set a new dataset to use as validation of our model. With the cleaning we pass from 160 features to 53.
+
+```{r ,message=FALSE}
+training<-filter(training, new_window=='no')
+training<-training[, !apply(is.na(training), 2, all)]
+testing<-testing[, !apply(is.na(testing), 2, all)]
+training<-training[,-c(1:7)]
+testing<-testing[,-c(1:7)]
+
+training<-training[,-nearZeroVar(training)]
+training<-training[complete.cases(training),]
+
+set.seed(666)
+inTraining<-createDataPartition(training$classe, p=0.7, list=FALSE)
+
+training2<-training[inTraining,]
+validation<-training[-inTraining,]
+```
+
+## Feature selection and enginering
+
+Let's take a look on the correlation matrix between features to see the covariance in the training dataset. We leave the column ('classe', 53) out.
+```{r ,message=FALSE}
+corrplot(cor(training2[,-53]), method='color', tl.col="black", order='hclust', tl.cex = 0.5)
+```
+
+We can observe that there is a high number of features that correlate. A general trend we can see is that features coming from the same sensors correlate quite well. If you think about it, it seems obvious that, for instance, the three measures from an accelerometer (X, Y, Z) in the arm covariate. To consider that, let's do some feature enginering by pre processing. We can create new features for each sensor location by principal component analysis (PCA). The next function extract the PCA components for belt, arm, forearm and dumbbell that explain the specified variability. Then we create the PCA processing in the training and validation sets.
+
+```{r ,message=FALSE}
+PCA_preProcess<-function(data, threshold){
+    belt_names<-grep('_belt',colnames(training2))
+    belt_preprocess<-preProcess(training2[,belt_names],method = 'pca',thresh = threshold)
+    belt_pca<-predict(belt_preprocess, data[,belt_names])
+    colnames(belt_pca)<-paste(colnames(belt_pca),'belt',sep='_')
+    
+    arm_names<-grep('_arm',colnames(training2))
+    arm_preprocess<-preProcess(training2[,arm_names],method = 'pca',thresh = threshold)
+    arm_pca<-predict(arm_preprocess, data[,arm_names])
+    colnames(arm_pca)<-paste(colnames(arm_pca),'arm',sep='_')
+    
+    dumbbell_names<-grep('_dumbbell',colnames(training2))
+    dumbbell_preprocess<-preProcess(training2[,dumbbell_names],method = 'pca',thresh = threshold)
+    dumbbell_pca<-predict(dumbbell_preprocess, data[,dumbbell_names])
+    colnames(dumbbell_pca)<-paste(colnames(dumbbell_pca),'dumbbell',sep='_')
+    
+    forearm_names<-grep('_forearm',colnames(training2))
+    forearm_preprocess<-preProcess(training2[,forearm_names],method = 'pca',thresh = threshold)
+    forearm_pca<-predict(forearm_preprocess, data[,forearm_names])
+    colnames(forearm_pca)<-paste(colnames(forearm_pca),'forearm',sep='_')
+    
+    pca_all<-as.data.frame(cbind(belt_pca, arm_pca, dumbbell_pca, forearm_pca))
+    pca_all
+}
+
+pca_training95<-PCA_preProcess(training2, 0.95)
+pca_training95$classe<-training2$classe
+
+pca_validation95<-PCA_preProcess(validation,0.95)
+pca_validation95$classe<-validation$classe
+
+pca_training8<-PCA_preProcess(training2, 0.8)
+pca_training8$classe<-training2$classe
+
+pca_validation8<-PCA_preProcess(validation,0.8)
+pca_validation8$classe<-validation$classe
+```
+
+## Fitting the model
+
+I decided to use random forest to fit the model. To control the model settings  and performe cross-validation we can build a trainControl() and set the method to 'cv'. We build 3 models, one with the original features and two with PCA set at 95% or 80% threshold. Then, We run a prediction with the validation dataset using the three models and check accuracy.
+
+```{r ,message=FALSE}
+controlRF <- trainControl(method="cv", number=3, verboseIter=FALSE)
+
+#Normal model
+system.time(model<-train(classe~.,method='rf', data=training2, trControl=controlRF))
+
+#PCA model at 95%
+system.time(pca_model95<-train(classe~.,method='rf', data=pca_training95, trControl=controlRF))
+
+#PCA model at 80%
+system.time(pca_model8<-train(classe~.,method='rf', data=pca_training8, trControl=controlRF))
+
+#Prediction model
+confusionMatrix(predict(model, validation),validation$classe)
+
+#Prediction pca_model95
+confusionMatrix(predict(pca_model95, pca_validation95),pca_validation95$classe)
+
+#Prediction pca_model8
+confusionMatrix(predict(pca_model8, pca_validation8),pca_validation8$classe)
+```
+
+We can observe that our model with the original features is the one with higher accuracy but is as well the one that needs bigger computational time. We may want to sacrify a 0.02 improvement in accuracy and deal with half or a third of the features using PCA. After that, we could do a feature deconstruction to extract the most informative ones form the PCA and re-build the model only with those.
+
+## Prediction of the test dataset
+
+We choose the model that performed better predictions using the validation set (model with original features) and apply it to predict the test set.
+
+```{r ,message=FALSE}
+predict(model, testing)
+```
